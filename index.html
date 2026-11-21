@@ -351,11 +351,11 @@ step('프로필 사진 불러오는 중',55);await preload(S.user&&S.user.img);
 step('청취 기록 불러오는 중',75);await loadPlays();step('클라우드 기록 확인 중',82);await cloudPull();await cloudPush();
 step('동기화 중',90);await sync();if(S.sync==='err')await sync();
 step('사진 불러오는 중',94);await Promise.all([loadAllImages(),pollNP(true)]);sweep();fillArt()}
-/* 로딩 중 모든 앨범·아티스트·곡 사진을 끝까지 확보한다.
-   Spotify 일괄 조회(곡 50개/아티스트 50명)로 요청 수를 줄이고, 429는 Retry-After만큼 기다리며,
-   진행이 없는 회차가 4번 연속일 때만 포기한다 (남은 건 앱 안에서 계속 이어서 채움). */
+/* 로딩 중 모든 앨범·아티스트·곡 사진을 확보한다.
+   Spotify의 배치 조회 API 대신 개별 조회 API를 사용한다.
+   429는 Retry-After만큼 기다리고, 동시 요청 수를 제한한다. */
 const NOIMG=new Set();
-async function spBatch(path){
+async function spRequest(path){
 let st=0;
 for(let n=0;n<6;n++){
  const tk=await spAccess();if(!tk)return{st:401};
@@ -382,35 +382,28 @@ async function pass(todo){
  for(const k of todo){
   if(k[0]==='t'||k[0]==='b'){const u=uriOf(k);if(u&&TR.test(u))add(u,k);else NOIMG.add(k)}
   else{const nm=k.slice(2);if(!AID[nm]&&!PLAYS.some(x=>x.a===nm&&x.artistId)){const p=PLAYS.find(x=>x.a===nm&&TR.test(x.u));if(p)add(p.u,k);else NOIMG.add(k)}}}
- const uris=[...byU.keys()];
- for(let i=0;i<uris.length&&!dead;i+=50){
-  const ch=uris.slice(i,i+50),r=await spBatch('/tracks?ids='+ch.map(u=>u.split(':')[2]).join(','));
-  lastSt=r.st;
+ const uris=[...byU.keys()];let ti=0;
+ const trackWorker=async()=>{while(ti<uris.length&&!dead){
+  const u=uris[ti++],ks=byU.get(u)||[],r=await spRequest('/tracks/'+u.split(':')[2]);lastSt=r.st;
   if(r.st===401||r.st===403){dead=true;break}
+  if(r.st===404){ks.forEach(k=>NOIMG.add(k));upd();continue}
   if(r.st!==200)continue;
-  (r.j.tracks||[]).forEach((t,j)=>{const u=ch[j],ks=byU.get(u)||[];
-   if(!t){ks.forEach(k=>NOIMG.add(k));return}
-   const im=pick((t.album||{}).images||[]);noteArt(t);if(im)IM['t:'+u]=im;
-   for(const k of ks){
-    if(k[0]==='a'){const nm=k.slice(2),ar=(t.artists||[]).find(x=>x.name===nm);if(ar&&ar.id)AID[nm]=ar.id;else NOIMG.add(k)}
-    else if(im){IM[k]=im;if((t.album||{}).uri)CT[k]=t.album.uri}else NOIMG.add(k)}});
-  upd()}
+  const t=r.j,im=pick((t.album||{}).images||[]);noteArt(t);if(im)IM['t:'+u]=im;
+  for(const k of ks){
+   if(k[0]==='a'){const nm=k.slice(2),ar=(t.artists||[]).find(x=>x.name===nm);if(ar&&ar.id)AID[nm]=ar.id;else NOIMG.add(k)}
+   else if(im){IM[k]=im;if((t.album||{}).uri)CT[k]=t.album.uri}else NOIMG.add(k)}
+  upd();await wait(120)
+ }};
+ await Promise.all(Array.from({length:Math.min(3,uris.length)},trackWorker));
  const aid=new Map();
  for(const k of todo)if(k[0]==='a'&&!hasAll(k)&&!NOIMG.has(k)){const nm=k.slice(2),id=AID[nm]||(PLAYS.find(x=>x.a===nm&&x.artistId)||{}).artistId;if(id){if(!aid.has(id))aid.set(id,[]);aid.get(id).push(k)}}
- const ids=[...aid.keys()],got=new Set(),setIm=(id,im)=>{for(const k of aid.get(id)||[]){if(im)IM[k]=im;else NOIMG.add(k)}};
- for(let i=0;i<ids.length&&!dead;i+=50){
-  const ch=ids.slice(i,i+50),r=await spBatch('/artists?ids='+ch.join(','));
-  lastSt=r.st;
-  if(r.st===401){dead=true;break}
-  if(r.st!==200)continue;
-  (r.j.artists||[]).forEach(a=>{if(!a)return;got.add(a.id);setIm(a.id,pick(a.images||[]))});
-  upd()}
- /* 일괄 조회가 막혔거나 빠진 아티스트는 한 명씩 조회 (천천히) */
- for(const id of ids){if(dead)break;if(got.has(id)||!(aid.get(id)||[]).some(k=>!hasAll(k)&&!NOIMG.has(k)))continue;
-  const r=await spBatch('/artists/'+id);lastSt=r.st;
-  if(r.st===401){dead=true;break}
+ const ids=[...aid.keys()],setIm=(id,im)=>{for(const k of aid.get(id)||[]){if(im)IM[k]=im;else NOIMG.add(k)}};let ai=0;
+ const artistWorker=async()=>{while(ai<ids.length&&!dead){const id=ids[ai++],r=await spRequest('/artists/'+id);lastSt=r.st;
+  if(r.st===401||r.st===403){dead=true;break}
   if(r.st===200)setIm(id,pick(r.j.images||[]));else if(r.st===404)setIm(id,'');
-  upd();await wait(250)}
+  upd();await wait(120)
+ }};
+ await Promise.all(Array.from({length:Math.min(3,ids.length)},artistWorker));
  store.set('ms_imgs',JSON.stringify(IM));store.set('ms_ctx',JSON.stringify(CT));saveTart()}
 let stale=0,last=-1;
 for(let n=0;n<60&&!dead&&stale<4;n++){
@@ -419,7 +412,7 @@ for(let n=0;n<60&&!dead&&stale<4;n++){
  const c=all.filter(done).length;
  if(c>last){last=c;stale=0}else{stale++;msg.textContent='사진 다시 시도 중 '+shown+' / '+total+(lastSt&&lastSt!==200?' (코드 '+lastSt+')':'');await wait(3000*stale)}}
 const left=all.filter(k=>!done(k)).length;
-if(dead){msg.textContent='Spotify 로그인 갱신 중';if(await autoRelogin())await wait(8000);msg.textContent='로그인 갱신이 필요합니다 (코드 '+lastSt+')';await wait(1500)}
+if(dead){if(lastSt===403){msg.textContent='Spotify API 접근이 거부되었습니다 (코드 403)';await wait(1500)}else{msg.textContent='Spotify 로그인 갱신 중';if(await autoRelogin())await wait(8000);msg.textContent='로그인 갱신이 필요합니다 (코드 '+lastSt+')';await wait(1500)}}
 else if(left){msg.textContent='사진 '+left+'개는 앱에서 이어서 불러옵니다 (코드 '+lastSt+')';await wait(1800)}
 else msg.textContent='사진 준비 중';
 const urls=[...new Set(all.map(k=>imgOf(k)).filter(Boolean))];let ui=0;
