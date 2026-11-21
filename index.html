@@ -286,14 +286,18 @@ const wantFor=t=>t==='dash'?wantDash():t==='rank'?wantRank():t==='prof'?(S.prof=
 function warm(){if(!S.user)return;const k=wantFor(S.tab).filter(k=>k&&!hasAll(k)&&canTry(k));if(!k.length)return;
 resolveKeys(k).then(async ch=>{if(!ch||!S.user)return;await Promise.all(wantFor(S.tab).map(x=>preload(x&&imgOf(x))));if(S.user&&!(document.activeElement&&document.activeElement.id==='q'))render()})}
 // 앨범 커버를 우선 처리하고, 미완료 항목은 다음 순회에서 계속 이어서 처리
-const allKeys=()=>{const albums=new Set(),artists=new Set();for(const p of PLAYS){if(p.b&&p.a)albums.add('b:'+p.b+SEP+p.a);if(p.a)artists.add('a:'+p.a)}return[...albums,...artists]};
+/* 전체 청취 기록에서 곡·앨범·아티스트 이미지를 모두 순차 조회한다.
+   중복 URI/이름은 한 번만 요청하고, 이미 이미지가 있는 항목은 건너뛴다. */
+const allKeys=()=>{const tracks=new Set(),albums=new Set(),artists=new Set();
+for(const p of PLAYS){if(p.u)tracks.add('t:'+p.u);if(p.b&&p.a)albums.add('b:'+p.b+SEP+p.a);if(p.a)artists.add('a:'+p.a)}
+return[...tracks,...albums,...artists]};
 let sweeping=false;
 async function sweep(){if(sweeping||!S.user||document.hidden)return;sweeping=true;
 try{const todo=allKeys().filter(k=>!hasAll(k)&&canTry(k)).slice(0,12);
-for(let i=0;i<todo.length;i+=6){if(!S.user)break;const ch=await resolveKeys(todo.slice(i,i+6));if(ch)await Promise.all(todo.slice(i,i+6).map(k=>preload(imgOf(k))));
+for(let i=0;i<todo.length;i+=6){if(!S.user)break;const batch=todo.slice(i,i+6),ch=await resolveKeys(batch);if(ch)await Promise.all(batch.map(k=>preload(imgOf(k))));
 if(ch&&S.user&&!(document.activeElement&&document.activeElement.id==='q'))render()}}
 finally{sweeping=false}}
-setInterval(()=>{sweep();fillArt()},20000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)sweep()});
+setInterval(()=>{sweep();fillArt()},10000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)sweep()});
 const crown='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 8l4.5 4L12 5l4.5 7L21 8l-2 11H5z"/></svg>';
 const tile=(lbl,n,sub,key,pk,ou)=>`<div class="board"${pk?` data-play="${esc(pk)}" role="button" tabindex="0" aria-label="${esc(n||'')} 재생"`:ou?` data-open="${esc(ou)}" role="button" tabindex="0" aria-label="${esc(n||'')} Spotify에서 열기"`:''}><span class="tag2 cr" role="img" aria-label="${lbl}">${crown}</span>${n?cv(key,n,96):''}<div class="t" style="padding:48px 14px 14px">${n?`<div class="pn" style="font-size:17px;color:#fff">${esc(n)}</div><div class="bc nm" style="font-size:13px">${sub}</div>`:'<div class="bc">기록 없음</div>'}</div></div>`;
 function donut(){const tot=ARTISTS.reduce((a,b)=>a+b[1],0);let acc=0;
@@ -503,7 +507,7 @@ const hr=Array(24).fill(0);for(const p of PLAYS)hr[new Date(p.t).getHours()]++;c
 return `<div class="sm3 s4">${sc('최근 7일',fmt(wt)+'회','하루 평균 '+(wt/7).toFixed(1)+'회')}${sc('연속 청취',st+'일','연속으로 들은 날')}${sc('들은 곡',fmt(new Set(PLAYS.map(p=>p.u)).size)+'곡','아티스트 '+fmt(new Set(PLAYS.map(p=>p.a)).size)+'명')}${sc('자주 듣는 시간',hl,fmt(hr[th])+'회')}</div><div class="card" style="margin-bottom:12px"><div class="ch"><h2>최근 7일</h2><span class="mu">단위: 회/일</span></div>${wt?statBars(w):'<div class="mu">최근 7일간 청취 기록이 없습니다.</div>'}</div><div class="card" style="margin-bottom:12px"><h2>최근 들은 곡</h2>${PLAYS.slice(0,5).map(p=>`<div class="row"><span class="mu">${new Date(p.t).toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',hour12:false})}</span>${cv('t:'+p.u,p.n,40)}<div class="grow"><div class="nm">${esc(p.n)}</div><div class="mu nm">${esc(p.a)}</div></div></div>`).join('')}</div>`}
 const V={
 dash(){const T=new Date();T.setHours(0,0,0,0);const today=PLAYS.filter(p=>p.t>=+T).length,ts=agg('곡','전체')[0],ta=agg('아티스트','전체')[0];
-return `<h1>대시보드</h1><p class="sub">내 음악 활동 요약</p><div class="sq"><div class="board" id="np" style="${esc(npBg())}" data-open="np" role="button" tabindex="0" aria-label="Spotify에서 열기">${npHtml()}</div><div class="board">${collage(recentAlbums(8),.72)}<span class="tag2">오늘 청취</span><div class="t" style="background:none;padding:0 16px 14px"><div class="big" style="font-size:52px">${fmt(today)}<span style="font-size:22px;font-weight:600">회</span></div></div></div>${tile('1위 곡',ts&&ts[0],ts&&esc(ts[1])+' · '+fmt(ts[2])+'회',ts&&'t:'+ts[3],ts&&'t:'+ts[3])}${tile('1위 아티스트',ta&&ta[0],ta&&fmt(ta[1])+'회',ta&&'a:'+ta[0],'',ta&&artistUrl(ta[0]))}</div>${dashInfo()}${syncCard()}`},
+return `<h1>대시보드</h1><p class="sub">내 음악 활동 요약</p><div class="sq"><div class="board" id="np" style="${esc(npBg())}" data-open="np" role="button" tabindex="0" aria-label="Spotify에서 열기">${npHtml()}</div><div class="board">${collage(recentAlbums(8),.72)}<span class="tag2">오늘 청취</span><div class="t" style="background:none;padding:0 16px 14px"><div class="big" style="font-size:52px">${fmt(today)}<span style="font-size:22px;font-weight:600">회</span></div></div></div>${tile('1위 곡',ts&&ts[0],ts&&esc(ts[1])+' · '+fmt(ts[2])+'회','',ts&&('https://open.spotify.com/track/'+ts[3]))}${tile('1위 아티스트',ta&&ta[0],ta&&fmt(ta[1])+'회',ta&&'a:'+ta[0],'',ta&&artistUrl(ta[0]))}</div>${dashInfo()}${syncCard()}`},
 rank(){const sb=S.kind!=='아티스트',L=agg(S.kind,S.per).slice(0,50),pl=r=>S.kind==='아티스트'?'':` data-play="${esc(keyOf(S.kind,r))}" role="button" tabindex="0" aria-label="${esc(r[0])} 재생"`,r1=L[0];
 return `<h1>청취 랭킹</h1><p class="sub">기간: ${S.per}</p><div class="ctl">${seg(['곡','아티스트','앨범'],'kind',S.kind)}${seg(Object.keys(PERIOD),'per',S.per).replace('class="seg"','class="seg end"')}</div>${r1?`<div class="board top1"${pl(r1)}><span class="tag2 cr" role="img" aria-label="1위">${crown}</span>${cv(keyOf(S.kind,r1),r1[0],96)}<div class="t" style="padding:64px 18px 18px"><div class="pn" style="font-size:26px;color:#fff">${esc(r1[0])}</div><div class="bc nm" style="font-size:14px">${sb?esc(r1[1])+' · ':''}${cn(r1,sb)}</div></div></div>`+(L.length>1?`<div class="mu" style="margin:4px 0 8px">2위부터 · 목록을 스크롤해서 보기</div><div class="card rl" tabindex="0" role="region" aria-label="2위 이후 순위">${L.slice(1).map((r,i)=>`<div class="row"${pl(r)}><div class="rk">${i+2}</div>${cv(keyOf(S.kind,r),r[0],44)}<div class="grow"><div class="nm">${esc(r[0])}</div>${sb?`<div class="mu nm">${esc(r[1])}</div>`:''}</div><div class="cnt">${cn(r,sb)}</div></div>`).join('')}</div>`:''):'<div class="card"><div class="mu">아직 청취 기록이 없습니다.</div></div>'}`},
 stat(){const u={일간:'일',주간:'주',월간:'월'}[S.stat],D=statData(S.stat),tot=D.reduce((a,b)=>a+b.n,0),mx=D.reduce((a,b)=>b.n>a.n?b:a,D[0]),span=D.length+({일간:'일',주간:'주',월간:'개월'}[S.stat]);
@@ -527,7 +531,8 @@ const IOS=/iP(ad|hone|od)/.test(navigator.userAgent)||(navigator.platform==='Mac
 function spUri(u){const m=/open\.spotify\.com\/(track|album|artist|playlist|show|episode)\/([A-Za-z0-9]+)/.exec(u||'');if(m)return'spotify:'+m[1]+':'+m[2];const q=/open\.spotify\.com\/search\/([^?#]*)/.exec(u||'');if(q){try{return'spotify:search:'+decodeURIComponent(q[1])}catch(e){}}return'spotify:'}
 /* 현재 재생 타일은 곡이 아닌 앨범 페이지를 연다: 곡 링크를 열면 Spotify가 그 곡을 처음부터 다시 재생함 */
 function openSp(v){const n=S.np;let u;if(!v||v==='np')u=n&&n.alb?'https://open.spotify.com/album/'+n.alb:(n&&n.url)||'https://open.spotify.com';else u=v;
-if(IOS){location.href=spUri(u);return}
+/* iOS의 spotify: 커스텀 스킴 호출을 피하고 표준 HTTPS 링크로 이동 */
+if(IOS){location.href=u;return}
 const w=window.open(u,'_blank');if(w){try{w.opener=null}catch(e){}}else location.href=u}
 document.addEventListener('click',e=>{const op=e.target.closest('[data-open]');if(op&&!e.target.closest('button')){openSp(op.dataset.open);return}const pl=e.target.closest('[data-play]');if(pl&&!e.target.closest('button')){playCmd(pl.dataset.play);return}
 const b=e.target.closest('button');if(!b)return;
