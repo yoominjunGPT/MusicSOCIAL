@@ -294,7 +294,7 @@ const ld=k=>{try{return JSON.parse(store.get(k)||'{}')}catch(e){return{}}};
 let TA=null,TAn=-1;
 const imgOf=k=>{const m=IM||(IM=ld('ms_imgs'));if(m[k])return m[k];
 if(k[0]==='t'){const p=PLAYS.find(x=>x.u===k.slice(2)&&x.img);return p&&p.img||''}
-if(k[0]==='b'){const[b,a]=k.slice(2).split(SEP),p=PLAYS.find(x=>x.b===b&&x.a===a&&x.img);return p&&p.img||''}
+if(k[0]==='b'){const[b,a]=k.slice(2).split(SEP),p=PLAYS.find(x=>x.b===b&&x.a===a&&(x.img||x.u));return p&&(p.img||IM['t:'+p.u])||''}
 return ''};
 const ctxOf=k=>k.startsWith('t:')?k.slice(2):(CT||(CT=ld('ms_ctx')))[k]||'';
 // 화면 표시용 이미지와 재생용 컨텍스트를 분리해, 컨텍스트가 없어도 이미지 재시도를 막지 않음
@@ -416,7 +416,13 @@ if(prog.f===100&&prog.v>99.6){bar.style.transform='scaleX(1)';prog.raf=0;return}
 bar.style.transform=`scaleX(${prog.v/100})`;prog.raf=requestAnimationFrame(paint)}
 function splash(on){const{sp,bar}=spl();if(on){Object.assign(prog,{v:0,t:0,f:0,c:0});bar.style.cssText='width:100%;transform-origin:0 50%;transform:scaleX(0);transition:none';sp.classList.remove('done');cancelAnimationFrame(prog.raf);prog.raf=requestAnimationFrame(paint)}else sp.classList.add('done')}
 function step(t,w){spl().m.textContent=t;prog.f=w;prog.t=Math.max(prog.t,w);prog.c=w>=100?100:Math.min(w+22,94)}
-const preload=u=>new Promise(r=>{if(!u)return r();const i=new Image(),t=setTimeout(r,8000);i.referrerPolicy='no-referrer';i.onload=()=>{clearTimeout(t);(i.decode?i.decode().catch(()=>{}):Promise.resolve()).then(r)};i.onerror=()=>{clearTimeout(t);r()};i.src=u});
+const preloadCache=new Map();
+const preload=u=>{
+ if(!u)return Promise.resolve();
+ if(preloadCache.has(u))return preloadCache.get(u);
+ const job=new Promise(r=>{const i=new Image(),t=setTimeout(r,5000);i.referrerPolicy='no-referrer';i.onload=()=>{clearTimeout(t);(i.decode?i.decode().catch(()=>{}):Promise.resolve()).then(r)};i.onerror=()=>{clearTimeout(t);r()};i.src=u});
+ preloadCache.set(u,job);return job
+};
 async function loadAccount(){
 step('프로필 불러오는 중',40);
 try{const a=await spAccess(),u=a&&await spMeWith(a);if(u){saveUser(u);S.user=u}}catch(e){}
@@ -425,26 +431,35 @@ step('프로필 사진 불러오는 중',55);await preload(S.user&&S.user.img);
 step('청취 기록 불러오는 중',75);await loadPlays();step('클라우드 기록 확인 중',82);await cloudPull();await cloudPush();
 step('동기화 중',90);await sync();if(S.sync==='err')await sync();
 step('사진 불러오는 중',94);
-/* 첫 화면에 필요한 사진만 백그라운드에서 불러온다. 전체 기록 사진 로딩 때문에 첫 화면을 막지 않는다. */
-loadAllImages().catch(e=>console.warn('사진 로딩:',e));
-await pollNP(true);sweep();fillArt()}
+/* 탭별 사진을 중복 없이 순차적으로 확보한 뒤 로딩 화면을 닫는다. */
+await loadAllImages();
+await pollNP(true);fillArt()}
 /* 로딩 중 모든 앨범·아티스트·곡 사진을 확보한다.
    Spotify의 배치 조회 API 대신 개별 조회 API를 사용한다.
    429는 Retry-After만큼 기다리고, 동시 요청 수를 제한한다. */
-const NOIMG=new Set();
+const NOIMG=new Set(),IMGFAIL=new Set();
+const requestCache=new Map(),requestBusy=new Map();
 async function spRequest(path){
-let st=0;
-for(let n=0;n<6;n++){
- const tk=await spAccess();if(!tk)return{st:401};
- let r;try{r=await tfetch('https://api.spotify.com/v1'+path,{headers:{Authorization:'Bearer '+tk}})}catch(e){st=-1;await wait(2000*(n+1));continue}
- if(r.ok)return{st:200,j:await r.json()};
- st=r.status;
- if(r.status===429){const ra=+r.headers.get('Retry-After')||5*(n+1);await wait(Math.min(60,ra+1)*1000);continue}
- if(r.status===401){if(n<2){await wait(500);continue}return{st:401}}
- if(r.status===403)return{st:403};
- if(r.status>=500){await wait(2000*(n+1));continue}
- return{st:r.status}}
-return{st}}
+ if(requestCache.has(path))return requestCache.get(path);
+ if(requestBusy.has(path))return requestBusy.get(path);
+ const job=(async()=>{
+  let st=0;
+  for(let n=0;n<4;n++){
+   const tk=await spAccess();if(!tk)return{st:401};
+   let r;try{r=await tfetch('https://api.spotify.com/v1'+path,{headers:{Authorization:'Bearer '+tk}})}catch(e){st=-1;if(n<3)await wait(700*(n+1));continue}
+   if(r.ok){const out={st:200,j:await r.json()};requestCache.set(path,out);return out}
+   st=r.status;
+   if(r.status===429){const ra=+r.headers.get('Retry-After')||2;await wait(Math.min(15,ra+1)*1000);continue}
+   if(r.status===401){if(n<2){await wait(400);continue}return{st:401}}
+   if(r.status===403)return{st:403};
+   if(r.status>=500){if(n<3)await wait(700*(n+1));continue}
+   const out={st};if(st===404)requestCache.set(path,out);return out
+  }
+  return{st}
+ })();
+ requestBusy.set(path,job);
+ try{const out=await job;requestCache.set(path,out);return out}finally{requestBusy.delete(path)}
+}
 async function loadAllImages(){
 const msg=spl().m;IM=IM||ld('ms_imgs');CT=CT||ld('ms_ctx');
 /* 각 탭에서 실제로 표시되는 사진을 화면 진입 전에 순서대로 확보한다. */
@@ -462,29 +477,29 @@ const update=name=>{msg.textContent=name+' 사진 불러오는 중 '+countDone()
 const uriOf=k=>{if(k[0]==='t')return k.slice(2);const[b,a]=k.slice(2).split(SEP),p=PLAYS.find(x=>x.b===b&&x.a===a&&TR.test(x.u));return p?p.u:''};
 async function pass(todo){
  const byU=new Map(),add=(u,k)=>{if(!byU.has(u))byU.set(u,[]);byU.get(u).push(k)};
- for(const k of todo){if(k[0]==='t'||k[0]==='b'){const u=uriOf(k);if(u&&TR.test(u))add(u,k);else NOIMG.add(k)}else{const nm=k.slice(2);if(!AID[nm]&&!PLAYS.some(x=>x.a===nm&&x.artistId)){const p=PLAYS.find(x=>x.a===nm&&TR.test(x.u));if(p)add(p.u,k);else NOIMG.add(k)}}}
+ for(const k of todo){if(k[0]==='t'||k[0]==='b'){const u=uriOf(k);if(u&&TR.test(u)){const cached=IM['t:'+u];if(cached)IM[k]=cached;else add(u,k)}else NOIMG.add(k)}else{const nm=k.slice(2);if(!AID[nm]&&!PLAYS.some(x=>x.a===nm&&x.artistId)){const p=PLAYS.find(x=>x.a===nm&&TR.test(x.u));if(p)add(p.u,k);else NOIMG.add(k)}}}
  const uris=[...byU.keys()];let ti=0;
- const trackWorker=async()=>{while(ti<uris.length&&!dead){const u=uris[ti++],ks=byU.get(u)||[],r=await spRequest('/tracks/'+u.split(':')[2]);lastSt=r.st;if(r.st===401||r.st===403){dead=true;break}if(r.st===404){ks.forEach(k=>NOIMG.add(k));continue}if(r.st!==200)continue;
+ const trackWorker=async()=>{while(ti<uris.length&&!dead){const u=uris[ti++],ks=byU.get(u)||[],r=await spRequest('/tracks/'+u.split(':')[2]);lastSt=r.st;if(r.st===401||r.st===403){dead=true;break}if(r.st===404){ks.forEach(k=>NOIMG.add(k));continue}if(r.st!==200){ks.forEach(k=>IMGFAIL.add(k));continue;}
   const t=r.j,im=pick((t.album||{}).images||[]);noteArt(t);if(im)IM['t:'+u]=im;
   for(const k of ks){if(k[0]==='a'){const nm=k.slice(2),ar=(t.artists||[]).find(x=>x.name===nm);if(ar&&ar.id)AID[nm]=ar.id;else NOIMG.add(k)}else if(im){IM[k]=im;if((t.album||{}).uri)CT[k]=t.album.uri}else NOIMG.add(k)}
-  update(activeName);await wait(100)}};
- await Promise.all(Array.from({length:Math.min(2,uris.length)},trackWorker));
+  update(activeName)}};
+ await trackWorker();
  const aid=new Map();for(const k of todo)if(k[0]==='a'&&!hasAll(k)&&!NOIMG.has(k)){const nm=k.slice(2),id=AID[nm]||(PLAYS.find(x=>x.a===nm&&x.artistId)||{}).artistId;if(id){if(!aid.has(id))aid.set(id,[]);aid.get(id).push(k)}}
  const ids=[...aid.keys()],setIm=(id,im)=>{for(const k of aid.get(id)||[]){if(im)IM[k]=im;else NOIMG.add(k)}};let ai=0;
- const artistWorker=async()=>{while(ai<ids.length&&!dead){const id=ids[ai++],r=await spRequest('/artists/'+id);lastSt=r.st;if(r.st===401||r.st===403){dead=true;break}if(r.st===200)setIm(id,pick(r.j.images||[]));else if(r.st===404)setIm(id,'');update(activeName);await wait(100)}};
- await Promise.all(Array.from({length:Math.min(2,ids.length)},artistWorker));
+ const artistWorker=async()=>{while(ai<ids.length&&!dead){const id=ids[ai++],r=await spRequest('/artists/'+id);lastSt=r.st;if(r.st===401||r.st===403){dead=true;break}if(r.st===200)setIm(id,pick(r.j.images||[]));else if(r.st===404)setIm(id,'');else if(r.st!==200)(aid.get(id)||[]).forEach(k=>IMGFAIL.add(k));update(activeName)}};
+ await artistWorker();
  store.set('ms_imgs',JSON.stringify(IM));store.set('ms_ctx',JSON.stringify(CT));saveTart();
 }
 for(const g of groups){activeName=g.name;update(g.name);if(g.name==='통계'){await wait(120);continue}let stale=0,last=-1;
- for(let n=0;n<8&&!dead&&stale<3;n++){const todo=g.keys.filter(k=>!done(k));if(!todo.length)break;
-  for(let i=0;i<todo.length&&!dead;i+=8){const batch=todo.slice(i,i+8);await pass(batch);await Promise.all(uniq(batch.map(imgOf)).map(preload));update(g.name)}
+ for(let n=0;n<3&&!dead&&stale<1;n++){const todo=g.keys.filter(k=>!done(k));if(!todo.length)break;
+  for(let i=0;i<todo.length&&!dead;i+=24){const batch=todo.slice(i,i+24);await pass(batch);await Promise.all(uniq(batch.map(imgOf)).map(preload));update(g.name)}
   const c=g.keys.filter(done).length;if(c>last){last=c;stale=0}else stale++
  }
 }
 store.set('ms_imgs',JSON.stringify(IM));store.set('ms_ctx',JSON.stringify(CT));saveTart();
 const missing=all.filter(k=>!hasAll(k)).length;
 if(dead){msg.textContent='Spotify API 제한으로 일부 사진을 가져오지 못했습니다. 로그인 또는 API 접근을 확인해 주세요.';await wait(1800)}
-else if(missing){msg.textContent='사진 로딩 완료 · Spotify에서 사진을 제공하지 않는 항목 '+missing+'개';await wait(1000)}
+else if(missing){const unavailable=all.filter(k=>NOIMG.has(k)).length,failed=all.filter(k=>IMGFAIL.has(k)).length;msg.textContent=failed?'일부 사진은 Spotify API 응답 지연으로 보류됨 · '+failed+'개':('사진 로딩 완료 · Spotify에서 사진을 제공하지 않는 항목 '+unavailable+'개');await wait(1200)}
 else{msg.textContent='모든 탭의 사진 로딩 완료';await wait(500)}
 }
 const resetS=()=>Object.assign(S,{tab:'dash',per:'전체',kind:'곡',prof:'info',q:'',stat:'일간',err:'',imp:'',sync:'ok'});
